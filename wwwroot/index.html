@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <title>TMiniWebServer</title>
+  <meta name="description" content="Web server running on Raspberry Pi Pico W using MicroPython.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+
+<body>
+  <h1>Hello, TMiniWebServer!</h1>
+  <p>これはTMiniWebServerというWebサーバーで動作しています。MicroPythonを用いてRaspberry Pi Pico Wで動かすために作成されました。</p>
+
+  <form action="/recvpost" method="post">
+    <label for="username">Name:</label><br>
+    <input type="text" id="username" name="username"><br>
+    <input type="submit" value="Submit">
+  </form>
+</body>
+</html>
