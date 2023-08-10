@@ -3,6 +3,9 @@ import uasyncio as asyncio
 import socket
 import sys
 import re
+import gc
+import binascii
+import hashlib
 from json import loads, dumps
 from tminiwebserver_util import TMiniWebServerUtil, HttpStatusCode
 
@@ -15,16 +18,24 @@ class _WebServerRoute:
         self.route_regex = routeRegex
 
 class TMiniWebServer:
-    _decorateRouteHandlers = []
+    _decorate_route_handlers = []
     debug = 0
 
     @classmethod
     def route(cls, url_path, method='GET'):
         def route_decorator(func):
             item = (url_path, method, func)
-            cls._decorateRouteHandlers.append(item)
+            cls._decorate_route_handlers.append(item)
             return func
         return route_decorator
+    
+    @classmethod
+    def with_websocket(cls, url_path):
+        def websocket_decorator(func):
+            item = (url_path, 'websocket', func)
+            cls._decorate_route_handlers.append(item)
+            return func
+        return websocket_decorator
     
     @staticmethod
     def log(message):
@@ -40,9 +51,11 @@ class TMiniWebServer:
         self._server_port = port
         self._wwwroot = wwwroot
         self._running = False
-        
-        self._routeHandlers = [ ]
-        for url_path, method, func in self._decorateRouteHandlers:
+        self._route_handlers = []
+        self._add_route_item(self._decorate_route_handlers)
+    
+    def _add_route_item(self, source_decorators):
+        for url_path, method, func in source_decorators:
             route_parts = url_path.split('/')
             route_arg_names = [ ]
             route_regex = ''
@@ -54,8 +67,9 @@ class TMiniWebServer:
                     route_regex = '/' + s
             route_regex += '$'
             route_regex = re.compile(route_regex)
-            self._routeHandlers.append(_WebServerRoute(url_path, method, func, route_arg_names, route_regex))
-    
+            self._route_handlers.append(_WebServerRoute(url_path, method.upper(), func, route_arg_names, route_regex))
+            TMiniWebServer.dlog(f'route add: {url_path}, {route_arg_names}')
+
     async def start(self):
         if self.is_started():
             return
@@ -79,11 +93,11 @@ class TMiniWebServer:
 
     def _get_route_handler(self, url_path, method):
         TMiniWebServer.dlog(f'search {url_path},{method}')
-        if self._routeHandlers:
+        if self._route_handlers:
             if url_path.endswith('/'):
                 url_path = url_path[:-1]
             method = method.upper()
-            for handler in self._routeHandlers:
+            for handler in self._route_handlers:
                 if handler.method == method:
                     m = handler.route_regex.match(url_path)
                     if m:
@@ -112,11 +126,11 @@ class TMiniWebServer:
         except Exception as e:
             TMiniWebServer.log(e)
 
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except:
-                pass
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except:
+            pass
         TMiniWebServer.dlog(f"webclient is terminated. [{addr}]")
 
     def get_file(self, request_path):
@@ -301,7 +315,10 @@ class TMiniWebClient:
                     return await self._routing_http()
                 else:
                     ## WebSocket
-                    return await self._start_websocket()
+                    if is_upg == 'websocket':
+                        return await self._routing_websocket()
+                    else:
+                        await self._write_bad_request()
             else:
                 await self._write_bad_request()
         else:
@@ -382,7 +399,7 @@ class TMiniWebClient:
                 TMiniWebServer.dlog(f'search static files [{self._server._wwwroot}]')
                 content, content_type = self._server.get_file(self._req_path)
                 if content is None:
-                    self.write_error_response(HttpStatusCode.NOT_FOUND)
+                    await self.write_error_response(HttpStatusCode.NOT_FOUND)
                     TMiniWebServer.log(f'fild not found [{self._req_path}]')
                 else:
                     TMiniWebServer.dlog(f'file found [{content_type}, {self._req_path}]')
@@ -398,7 +415,165 @@ class TMiniWebClient:
             pass
         return result
 
-    async def _start_websocket(self):
-        TMiniWebServer.dlog('in _start_websocket')
+    async def _routing_websocket(self):
+        TMiniWebServer.dlog('in _routing_websocket')
+        route, route_args = self._server._get_route_handler(self._req_path, 'websocket')
+        if not route:
+            TMiniWebServer.dlog(f'not found websocket route. [{self._req_path}]')
+            await self._write_bad_request()
+            return True
+
+        websocket = TMiniWebSocket(self)
+        try:
+            if await websocket.handshake() == False:
+                TMiniWebServer.dlog('handshake failed.')
+                return True
+        except:
+            return False
+        
+        try:
+            TMiniWebServer.dlog(f'found route: {self._req_path}, args: {route_args}')
+            if route_args:
+                await route(websocket, route_args)
+            else:
+                await route(websocket)
+        except Exception as ex:
+            TMiniWebServer.log(ex)
+            return False
+        
+        return True
+
+    async def _loop_websocket(self, websocket):
+        TMiniWebServer.dlog(f'[{websocket}] websocket opened')
+        while not websocket.is_closed():
+            try:
+                data = await websocket.receive()
+                print(f'received: {data}')
+                await websocket.send("Hello,world!!", type = TMiniWebSocket.MessageType.TEXT)
+            except Exception as ex:
+                sys.print_exception(ex)
+        TMiniWebServer.dlog(f'[{websocket}] websocket closed')
+
+class TMiniWebSocket:
+    class Opcode:
+        CONTINUE = 0
+        TEXT = 1
+        BINARY = 2
+        CLOSE = 8
+        PING = 9
+        PONG = 10
+    class MessageType:
+        TEXT = 1
+        BINARY = 2
+    
+    def __init__(self, client):
+        self._client = client
+        self._closed = False
         pass
+
+    def is_closed(self):
+        return self._closed
+    
+    async def close(self):
+        try:
+            await self._send_core(self.Opcode.CLOSE, b'')
+        except:
+            pass
+        self._closed = True
+
+    async def handshake(self):
+        websocket_key = self._client._headers.get('sec-websocket-key', None)
+        if websocket_key is None:
+            self._client._write_bad_request()
+            return False
+        else:
+            d = hashlib.sha1(websocket_key.encode())
+            d.update(b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+            response_key = binascii.b2a_base64(d.digest())[:-1].decode()
+            await self._send_upgrade_response(response_key)
+            return True
+
+    async def receive(self):
+        while not self.is_closed():
+            try:
+                opcode, payload = await self._read_frame()
+                send_opcode, data = self._process_frame(opcode, payload)
+                if send_opcode:
+                    await self._send_core(send_opcode, data)
+                elif data:
+                    return data
+            except Exception as ex:
+                self._closed = True
+                TMiniWebServer.log(f'WebSocket closed. (exception : {ex})')
+
+    async def send(self, data, type = MessageType.TEXT):
+        if type == self.MessageType.TEXT:
+            await self._send_core(self.Opcode.TEXT, data)
+        if type == self.MessageType.BINARY:
+            await self._send_core(self.Opcode.BINARY, data)
+
+    async def _send_upgrade_response(self, response_key):
+        self._client._write_status_code(HttpStatusCode.SWITCH_PROTOCOLS)
+        self._client._write_header('upgrade', 'websocket')
+        self._client._write_header('connection', 'upgrade')
+        self._client._write_header('sec-websocket-accept', response_key)
+        self._client._writer.write("\r\n")
+        await self._client._writer.drain()
+
+    async def _send_core(self, opcode, payload):
+        try:
+            frame = bytearray()
+            frame.append(0x80 | int(opcode))
+            if opcode == self.Opcode.TEXT:
+                payload = payload.encode()
+
+            payload_length = len(payload)        
+            if payload_length < 126:
+                frame.append(payload_length)
+            elif payload_length < (1 << 16):
+                frame.append(126)
+                frame.extend(payload_length.to_bytes(2, 'big'))
+            else:
+                frame.append(127)
+                frame.extend(payload_length.to_bytes(8, 'big'))
+            frame.extend(payload)
+            self._client._writer.write(frame)
+            await self._client._writer.drain()
+        except Exception as ex:
+            sys.print_exception(ex)
+
+    async def _read_frame(self):
+        header = await self._client._reader.read(2)
+        if len(header) != 2:
+            TMiniWebServer.log('Invalid WebSocket frame header')
+            raise OSError(32, 'WebSocket connection closed')
+        ## ヘッダのパース.
+        fin = header[0] & 0x80 > 0
+        opcode = header[0] & 0x0F
+        has_mask = header[1] & 0x80 > 0
+        length = header[1] & 0x7F
+
+        if length < 0:
+            length = await self._client._reader.read(-length)
+            length = int.from_bytes(length, 'big')
+        if has_mask:
+            mask = await self._client._reader.read(4)
+        payload = await self._client._reader.read(length)
+        if has_mask:
+            payload = bytes( x ^ mask[i % 4] for i, x, in enumerate(payload))
+        return opcode, payload
+    
+    def _process_frame(self, opcode, payload):
+        if opcode == self.Opcode.TEXT:
+            payload = payload.decode()
+        elif opcode == self.Opcode.BINARY:
+            pass
+        elif opcode == self.Opcode.CLOSE:
+            self._closed = True
+            pass 
+        elif opcode == self.Opcode.PING:
+            return self.Opcode.PONG, payload
+        elif opcode == self.Opcode.PONG:
+            return None, None
+        return None, payload
 

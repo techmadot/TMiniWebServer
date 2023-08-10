@@ -1,8 +1,9 @@
-from tminiwebserver import TMiniWebServer, TMiniWebClient
+from tminiwebserver import TMiniWebServer, TMiniWebClient, TMiniWebSocket
 from tminiwebserver_util import HttpStatusCode
 
 import uasyncio as asyncio
 import gc
+import sys
 from json import loads,dumps
 
 ##-------------------------------------------------------------------------
@@ -71,6 +72,19 @@ async def restapi_article_post(client):
     json_data = dumps(res_obj)
     await client.write_response(content=json_data, content_type="application/json")
 
+@TMiniWebServer.with_websocket('/ws/<id>')
+async def websockcet_handler(websocket, args):
+    print(f"id: {args['id']}")
+    while not websocket.is_closed():
+        try:
+            data = await websocket.receive()
+            print(f'received: {data}')
+            if data == 'cmd_close':
+                await websocket.close()
+            else:
+                await websocket.send("Hello,world!!", type = TMiniWebSocket.MessageType.TEXT)
+        except Exception as ex:
+            sys.print_exception(ex)
 
 ## Webサーバーの開始と定期的な掃除
 async def main_task():
