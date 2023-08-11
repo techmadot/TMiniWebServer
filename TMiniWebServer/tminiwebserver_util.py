@@ -34,7 +34,8 @@ class TMiniWebServerUtil:
             stat(path)
             result = True
         except Exception as ex:
-            sys.print_exception(ex)
+            # sys.print_exception(ex)
+            pass
         
         gc.collect()
         return result

@@ -93,26 +93,30 @@ class TMiniWebServer:
 
     def _get_route_handler(self, url_path, method):
         TMiniWebServer.dlog(f'search {url_path},{method}')
-        if self._route_handlers:
-            if url_path.endswith('/'):
-                url_path = url_path[:-1]
-            method = method.upper()
-            for handler in self._route_handlers:
-                if handler.method == method:
-                    m = handler.route_regex.match(url_path)
-                    if m:
-                        if handler.route_arg_names:
-                            route_args = { }
-                            for i, name in enumerate(handler.route_arg_names):
-                                value = m.group(i+1)
-                                try:
-                                    value = int(value)
-                                except:
-                                    pass
-                                route_args[name] = value
-                            return (handler.func, route_args)
-                        else:
-                            return (handler.func, None)
+        try:
+            if self._route_handlers:
+                if url_path.endswith('/'):
+                    url_path = url_path[:-1]
+                method = method.upper()
+                for handler in self._route_handlers:
+                    if handler.method == method:
+                        m = handler.route_regex.match(url_path)
+                        if m:
+                            if handler.route_arg_names:
+                                route_args = { }
+                                for i, name in enumerate(handler.route_arg_names):
+                                    value = m.group(i+1)
+                                    try:
+                                        value = int(value)
+                                    except:
+                                        pass
+                                    route_args[name] = value
+                                return (handler.func, route_args)
+                            else:
+                                return (handler.func, None)
+        except Exception as ex:
+            sys.print_exception(ex)
+
         return (None, None)
 
     async def _server_proc(self, reader, writer):
@@ -468,17 +472,6 @@ class TMiniWebClient:
         
         return True
 
-    async def _loop_websocket(self, websocket):
-        TMiniWebServer.dlog(f'[{websocket}] websocket opened')
-        while not websocket.is_closed():
-            try:
-                data = await websocket.receive()
-                print(f'received: {data}')
-                await websocket.send("Hello,world!!", type = TMiniWebSocket.MessageType.TEXT)
-            except Exception as ex:
-                sys.print_exception(ex)
-        TMiniWebServer.dlog(f'[{websocket}] websocket closed')
-
 class TMiniWebSocket:
     class Opcode:
         CONTINUE = 0
@@ -523,13 +516,21 @@ class TMiniWebSocket:
             try:
                 opcode, payload = await self._read_frame()
                 send_opcode, data = self._process_frame(opcode, payload)
+                if self.is_closed():
+                    continue
+
                 if send_opcode:
                     await self._send_core(send_opcode, data)
                 elif data:
-                    return data
+                    if opcode == self.Opcode.BINARY:
+                        return data, self.MessageType.BINARY
+                    elif opcode == self.Opcode.TEXT:
+                        return data, self.MessageType.TEXT
             except Exception as ex:
                 self._closed = True
                 TMiniWebServer.log(f'WebSocket closed. (exception : {ex})')
+                return None, None
+        return None, None
 
     async def send(self, data, type = MessageType.TEXT):
         if type == self.MessageType.TEXT:
@@ -546,6 +547,8 @@ class TMiniWebSocket:
         await self._client._writer.drain()
 
     async def _send_core(self, opcode, payload):
+        if self.is_closed():
+            return
         try:
             frame = bytearray()
             frame.append(0x80 | int(opcode))
