@@ -1,5 +1,7 @@
 import gc
+import sys
 from os import stat
+
 
 class TMiniWebServerUtil:
     @staticmethod
@@ -31,8 +33,8 @@ class TMiniWebServerUtil:
         try:
             stat(path)
             result = True
-        except:
-            pass
+        except Exception as ex:
+            sys.print_exception(ex)
         
         gc.collect()
         return result
@@ -45,6 +47,14 @@ class TMiniWebServerUtil:
                 return TMiniWebServerUtil._mime_types[ext]
         return 'application/octet-stream'
 
+    @staticmethod
+    def get_file_size(path):
+        try:
+            info = stat(path)
+            return info[6] ## file_size
+        except Exception as ex:
+            sys.print_exception(ex)
+            return 0
 
     _html_escape_chars = {
         "&" : "&amp;",

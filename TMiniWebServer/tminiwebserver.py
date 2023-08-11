@@ -1,4 +1,3 @@
-import tminiwebserver
 import uasyncio as asyncio
 import socket
 import sys
@@ -7,7 +6,7 @@ import gc
 import binascii
 import hashlib
 from json import loads, dumps
-from tminiwebserver_util import TMiniWebServerUtil, HttpStatusCode
+from .tminiwebserver_util import TMiniWebServerUtil, HttpStatusCode
 
 class _WebServerRoute:
     def __init__(self, route, method, func, route_arg_names, routeRegex):
@@ -20,6 +19,7 @@ class _WebServerRoute:
 class TMiniWebServer:
     _decorate_route_handlers = []
     debug = 0
+    gc_after_filesend = 1   ## ファイル送信後にGC発動しておくためのフラグ.
 
     @classmethod
     def route(cls, url_path, method='GET'):
@@ -133,7 +133,7 @@ class TMiniWebServer:
             pass
         TMiniWebServer.dlog(f"webclient is terminated. [{addr}]")
 
-    def get_file(self, request_path):
+    def get_phys_path_in_wwwroot(self, request_path):
         file_path = ''
         exist_file = False
         if request_path != '/':
@@ -148,14 +148,7 @@ class TMiniWebServer:
         if not exist_file:
             return None, None
         mime_type = TMiniWebServerUtil.get_minetype_from_ext(file_path)
-        file_data = None
-        try:
-            with open(file_path, 'rb') as f:
-                file_data = f.read()
-        except Exception as ex:
-            TMiniWebServer.log(f'file read failed. [{file_path}] : {ex}')
-            mime_type = None
-        return file_data, mime_type
+        return file_path, mime_type
 
     _http_status_messages = {
         HttpStatusCode.SWITCH_PROTOCOLS: 'Switching Protocols',
@@ -220,8 +213,8 @@ class TMiniWebClient:
         await self._writer.wait_closed()
 
     async def write_response(self, content, headers={}, http_status = HttpStatusCode.OK, content_type="text/html", content_charset='UTF-8'):
+        TMiniWebServer.dlog('[in] write_response')
         try:
-            TMiniWebServer.dlog('[in] write_response')
             if content:
                 if type(content) == str:
                     content = content.encode(content_charset)
@@ -234,11 +227,40 @@ class TMiniWebClient:
 
             self._writer.write(content)
             await self._writer.drain()
-            TMiniWebServer.dlog('[out] write_response')
         except Exception as ex:
             TMiniWebServer.log(ex)
             pass
-        pass
+        TMiniWebServer.dlog('[out] write_response')
+
+    async def write_response_from_file(self, file_phys_path, headers={}, http_status = HttpStatusCode.OK, content_type=None, content_charset='UTF-8'):
+        TMiniWebServer.dlog('[in] write_response_from_file')
+        try:
+            if not TMiniWebServerUtil.is_exist_file(file_phys_path):
+                await self.write_error_response(HttpStatusCode.NOT_FOUND)
+                return
+            if content_type is None:
+                content_type = TMiniWebServerUtil.get_minetype_from_ext(file_phys_path)
+
+            content_length = TMiniWebServerUtil.get_file_size(file_phys_path)
+            self._write_status_code(http_status)
+            self._write_headers(headers, content_type, content_charset, content_length)
+            await self._writer.drain()
+            
+            if content_length > 0:
+                with open(file_phys_path, 'rb') as f:
+                    while True:
+                        data = f.read(16*1024)
+                        if len(data) > 0:
+                            self._writer.write(data)
+                            await self._writer.drain()
+                        else:
+                            break
+            if TMiniWebServer.gc_after_filesend:
+                gc.collect()
+        except Exception as ex:
+            sys.print_exception(ex)
+
+        TMiniWebServer.dlog('[out] write_response_from_file')
 
     async def write_error_response(self, code, content=None):
         if content is None:
@@ -365,7 +387,7 @@ class TMiniWebClient:
                 TMiniWebServer.dlog(f"headers={self._headers}")
                 return True
             else:
-                tminiwebserver.log(f"_parse_header warning: {elements}")
+                TMiniWebServer.log(f"_parse_header warning: {elements}")
                 return False
 
     def _check_upgrade(self):
@@ -397,13 +419,15 @@ class TMiniWebClient:
             TMiniWebServer.dlog('routing is not found.')
             if self._method.upper() == 'GET':
                 TMiniWebServer.dlog(f'search static files [{self._server._wwwroot}]')
-                content, content_type = self._server.get_file(self._req_path)
-                if content is None:
+                file_phys_path, mime_type = self._server.get_phys_path_in_wwwroot(self._req_path)
+
+                if file_phys_path is None:
                     await self.write_error_response(HttpStatusCode.NOT_FOUND)
                     TMiniWebServer.log(f'fild not found [{self._req_path}]')
                 else:
-                    TMiniWebServer.dlog(f'file found [{content_type}, {self._req_path}]')
-                    await self.write_response(content=content, content_type=content_type)
+                    TMiniWebServer.dlog(f'file found [{mime_type}, {file_phys_path}]')
+                    await self.write_response_from_file(file_phys_path, content_type=mime_type)
+
                 result = True ## メソッドの処理結果としては正常の処理.
             else:
                 await self._write_bad_request()
@@ -412,6 +436,7 @@ class TMiniWebClient:
             self._writer.close()
             await self._writer.wait_closed()
         except Exception as ex:
+            sys.print_exception(ex)
             pass
         return result
 

@@ -1,5 +1,4 @@
-from tminiwebserver import TMiniWebServer, TMiniWebClient, TMiniWebSocket
-from tminiwebserver_util import HttpStatusCode
+from TMiniWebServer import TMiniWebServer, TMiniWebClient, TMiniWebSocket, HttpStatusCode
 
 import uasyncio as asyncio
 import gc
