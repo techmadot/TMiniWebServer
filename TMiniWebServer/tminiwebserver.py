@@ -64,8 +64,9 @@ class TMiniWebServer:
                     route_arg_names.append(s[1:-1])
                     route_regex += '/(\\w*)'
                 elif s:
-                    route_regex = '/' + s
+                    route_regex += '/' + s
             route_regex += '$'
+            TMiniWebServer.dlog(f"  url_path:{url_path} -> regex: {route_regex}")
             route_regex = re.compile(route_regex)
             self._route_handlers.append(_WebServerRoute(url_path, method.upper(), func, route_arg_names, route_regex))
             TMiniWebServer.dlog(f'route add: {url_path}, {route_arg_names}')
@@ -116,6 +117,7 @@ class TMiniWebServer:
                                 return (handler.func, None)
         except Exception as ex:
             sys.print_exception(ex)
+            print(f"  {url_path}, {method}")
 
         return (None, None)
 
@@ -126,7 +128,7 @@ class TMiniWebServer:
             TMiniWebServer.log(f"connected by {addr}")
             client = TMiniWebClient(reader, writer, self)
             if not await client._processRequest():
-                TMiniWebServer.log('process request failed.')
+                TMiniWebServer.log(f'process request failed. {addr}')
         except Exception as e:
             TMiniWebServer.log(e)
 
@@ -253,7 +255,7 @@ class TMiniWebClient:
             if content_length > 0:
                 with open(file_phys_path, 'rb') as f:
                     while True:
-                        data = f.read(16*1024)
+                        data = f.read(4*1024)
                         if len(data) > 0:
                             self._writer.write(data)
                             await self._writer.drain()
@@ -353,7 +355,8 @@ class TMiniWebClient:
 
     async def _parse(self):
         try:
-            line = (await self._reader.readline()).decode().strip()
+            readline = await self._reader.readline()
+            line = readline.decode().strip()
             elements = line.split()
             if len(elements) == 3:
                 self._method = elements[0].upper()
@@ -373,6 +376,11 @@ class TMiniWebClient:
                                 self._query_params[TMiniWebServerUtil.unquote(param[0])] = value
                         TMiniWebServer.dlog(f'{self} query_string:{self._query_string}')
                         TMiniWebServer.dlog(f'{self} query_params:{self._query_params}')
+                return True
+            else:
+                TMiniWebServer.dlog("failed read first line (httprequest)")
+                return False
+
             return True
         except Exception as ex:
             TMiniWebServer.log(ex)
@@ -408,6 +416,11 @@ class TMiniWebClient:
     async def _routing_http(self):
         TMiniWebServer.dlog('in _routing_http')
         route, route_args = self._server._get_route_handler(self._req_path, self._method)
+        if self._method is None:
+            print(self._req_path)
+            print(self._path)
+            print(self._headers)
+
         result = False
         if route:
             TMiniWebServer.dlog(f'found route: {self._req_path}, args: {route_args}')
@@ -567,6 +580,10 @@ class TMiniWebSocket:
             frame.extend(payload)
             self._client._writer.write(frame)
             await self._client._writer.drain()
+        except OSError as ex:
+            if ex.errno == 104: ## ECONNREST
+                self._closed = True
+            return
         except Exception as ex:
             sys.print_exception(ex)
 
